@@ -6,7 +6,7 @@ set -eu
 
 DISK="${DISK:-/dev/vda}"
 HOSTNAME="${HOSTNAME:-alpine-node}"
-MIRROR_BASE="${MIRROR_BASE:-https://mirrors.aliyun.com/alpine}"
+MIRROR_BASE="${MIRROR_BASE:-https://dl-cdn.alpinelinux.org/alpine}"
 SSH_PORT="${SSH_PORT:-22}"
 LOG_TMPFS_SIZE="${LOG_TMPFS_SIZE:-8m}"
 SYSLOG_FILE_KB="${SYSLOG_FILE_KB:-128}"
@@ -86,7 +86,7 @@ fi
 
 # Verify both routing and DNS before erasing the disk.
 ping -c 1 -W 3 223.5.5.5 >/dev/null 2>&1 || die 'No external network connectivity.'
-nslookup mirrors.aliyun.com >/dev/null 2>&1 || die 'DNS resolution failed.'
+nslookup dl-cdn.alpinelinux.org >/dev/null 2>&1 || die 'DNS resolution failed.'
 
 ALPINE_RELEASE="$(cat /etc/alpine-release)"
 ALPINE_BRANCH="$(printf '%s\n' "$ALPINE_RELEASE" | awk -F. '{print $1"."$2}')"
