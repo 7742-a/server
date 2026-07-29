@@ -125,21 +125,20 @@ esac
 REPO="$MIRROR_BASE/v$ALPINE_BRANCH"
 
 # Force official Alpine mirror
-cat > <<EOF
+cat >/etc/apk/repositories <<EOF
 https://dl-cdn.alpinelinux.org/alpine/v$ALPINE_BRANCH/main
 https://dl-cdn.alpinelinux.org/alpine/v$ALPINE_BRANCH/community
 EOF
-
 apk update
 # alpine-virt ISO 可能不自带 setup-alpine，自动补装
 if ! command -v setup-alpine >/dev/null 2>&1; then
     say 'setup-alpine is missing; installing alpine-conf automatically'
 
     # 先尝试使用 ISO 自带的本地软件仓库
-    if [ -d /media/cdrom/apks ]; then
+  
        
         apk add alpine-conf >/dev/null 2>&1 || true
-    fi
+   
 
     # ISO 中没有 alpine-conf 时，改用官方网络仓库
     if ! command -v setup-alpine >/dev/null 2>&1; then
