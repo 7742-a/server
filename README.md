@@ -4,5 +4,10 @@
 连接网络或者也可以直接复制vnc.sh输入到vnc命令框中
 
 ```
-ip link 
+link set eth0 up
+udhcpc -i eth0
+```
+之后查看有没有IP地址
+```
+ip a
 ```
