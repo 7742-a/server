@@ -340,5 +340,5 @@ trap - EXIT
 if [ "$AUTO_POWEROFF" = yes ]; then
     printf '\nPowering off in 10 seconds. Detach the ISO before the next boot.\n'
     sleep 10
-    poweroff
+    reboot
 fi
