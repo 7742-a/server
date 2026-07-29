@@ -95,18 +95,19 @@ case "$ALPINE_BRANCH" in
     *) die "Cannot determine Alpine branch from $ALPINE_RELEASE." ;;
 esac
 REPO="$MIRROR_BASE/v$ALPINE_BRANCH"
+
 # alpine-virt ISO 可能不自带 setup-alpine，自动补装
-if [ ! -x /sbin/setup-alpine ]; then
+if ! command -v setup-alpine >/dev/null 2>&1; then
     say 'setup-alpine is missing; installing alpine-conf automatically'
 
-    # 优先从当前 ISO 本地仓库安装，不依赖网络
+    # 先尝试使用 ISO 自带的本地软件仓库
     if [ -d /media/cdrom/apks ]; then
         printf '%s\n' '/media/cdrom/apks' > /etc/apk/repositories
         apk add alpine-conf >/dev/null 2>&1 || true
     fi
 
-    # 本地 ISO 没有的话，再从网络仓库安装
-    if [ ! -x /sbin/setup-alpine ]; then
+    # ISO 中没有 alpine-conf 时，改用官方网络仓库
+    if ! command -v setup-alpine >/dev/null 2>&1; then
         printf '%s\n' \
             "https://dl-cdn.alpinelinux.org/alpine/v$ALPINE_BRANCH/main" \
             > /etc/apk/repositories
@@ -115,7 +116,7 @@ if [ ! -x /sbin/setup-alpine ]; then
         apk add alpine-conf
     fi
 
-    [ -x /sbin/setup-alpine ] ||
+    command -v setup-alpine >/dev/null 2>&1 ||
         die 'Could not install setup-alpine automatically.'
 fi
 
