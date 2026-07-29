@@ -4,18 +4,35 @@ set -eu
 # Alpine 3.24+ minimal node server installer for a 1 GiB disk.
 # WARNING: The selected disk will be erased completely.
 
-DISK="${DISK:-/dev/vda}"
+if [ -z "${DISK:-}" ]; then
+
+for d in \
+/dev/vda \
+/dev/xvda \
+/dev/sda \
+/dev/nvme0n1
+
+do
+
+    [ -b "$d" ] && {
+        DISK="$d"
+        break
+    }
+
+done
+
+fi
 HOSTNAME="${HOSTNAME:-alpine-node}"
-MIRROR_BASE="${MIRROR_BASE:-https://dl-cdn.alpinelinux.org/alpine}"
+MIRROR_BASE="https://dl-cdn.alpinelinux.org/alpine"
 SSH_PORT="${SSH_PORT:-22}"
 LOG_TMPFS_SIZE="${LOG_TMPFS_SIZE:-8m}"
 SYSLOG_FILE_KB="${SYSLOG_FILE_KB:-128}"
 SYSLOG_BACKUPS="${SYSLOG_BACKUPS:-2}"
-AUTO_POWEROFF="${AUTO_POWEROFF:-yes}"
+AUTO_REBOOT="${AUTO_REBOOT:-yes}"
 
 # Compatibility packages for common node installation scripts.
 # BusyBox already provides wget, vi, tar, gzip, unzip, ip, ping, sed and awk.
-TARGET_PACKAGES="${TARGET_PACKAGES:-bash curl ca-certificates}"
+TARGET_PACKAGES="${TARGET_PACKAGES:-bash curl wget nano vim git ca-certificates openssl tzdata jq tar gzip unzip}"
 
 say() { printf '\n[+] %s\n' "$*"; }
 warn() { printf '\n[!] %s\n' "$*" >&2; }
@@ -30,27 +47,38 @@ cleanup_mounts() {
 }
 
 prompt_password() {
-    [ -n "${ROOT_PASSWORD:-}" ] && return 0
+
+    unset ROOT_PASSWORD
 
     while :; do
-        printf 'Set the new root password: '
-        stty -echo 2>/dev/null || true
-        IFS= read -r ROOT_PASSWORD
-        stty echo 2>/dev/null || true
-        printf '\nRepeat the root password: '
-        stty -echo 2>/dev/null || true
-        IFS= read -r ROOT_PASSWORD_2
-        stty echo 2>/dev/null || true
-        printf '\n'
 
-        [ -n "$ROOT_PASSWORD" ] || { warn 'Password cannot be empty.'; continue; }
-        [ "$ROOT_PASSWORD" = "$ROOT_PASSWORD_2" ] || { warn 'The two passwords do not match.'; continue; }
-        case "$ROOT_PASSWORD" in
-            *:*) warn 'Do not use a colon in the password for this installer.'; continue ;;
-        esac
-        unset ROOT_PASSWORD_2
+        printf "Set root password: "
+
+        stty -echo
+        IFS= read -r ROOT_PASSWORD
+        stty echo
+
+        echo
+
+        printf "Repeat password: "
+
+        stty -echo
+        IFS= read -r ROOT_PASSWORD_2
+        stty echo
+
+        echo
+
+
+        [ "$ROOT_PASSWORD" = "$ROOT_PASSWORD_2" ] || {
+            echo "Password mismatch"
+            continue
+        }
+
+
         break
+
     done
+
 }
 
 [ "$(id -u)" -eq 0 ] || die 'Run this installer as root.'
@@ -96,6 +124,13 @@ case "$ALPINE_BRANCH" in
 esac
 REPO="$MIRROR_BASE/v$ALPINE_BRANCH"
 
+# Force official Alpine mirror
+cat >/etc/apk/repositories <<EOF
+https://dl-cdn.alpinelinux.org/alpine/v$ALPINE_BRANCH/main
+https://dl-cdn.alpinelinux.org/alpine/v$ALPINE_BRANCH/community
+EOF
+
+apk update
 # alpine-virt ISO 可能不自带 setup-alpine，自动补装
 if ! command -v setup-alpine >/dev/null 2>&1; then
     say 'setup-alpine is missing; installing alpine-conf automatically'
@@ -337,8 +372,12 @@ printf 'After shutdown, detach the ISO and boot from %s.\n' "$DISK"
 cleanup_mounts
 trap - EXIT
 
-if [ "$AUTO_POWEROFF" = yes ]; then
-    printf '\nPowering off in 10 seconds. Detach the ISO before the next boot.\n'
-    sleep 10
-    reboot
+if [ "$AUTO_REBOOT" = yes ]; then
+
+echo "Rebooting..."
+
+sleep 5
+
+reboot
+
 fi
