@@ -113,7 +113,7 @@ if ! ip -4 addr show dev "$IFACE" 2>/dev/null | grep -q 'inet '; then
 fi
 
 # Verify both routing and DNS before erasing the disk.
-ping -c 1 -W 3 223.5.5.5 >/dev/null 2>&1 || die 'No external network connectivity.'
+ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1 || die 'No external network connectivity.'
 nslookup dl-cdn.alpinelinux.org >/dev/null 2>&1 || die 'DNS resolution failed.'
 
 ALPINE_RELEASE="$(cat /etc/alpine-release)"
@@ -125,7 +125,7 @@ esac
 REPO="$MIRROR_BASE/v$ALPINE_BRANCH"
 
 # Force official Alpine mirror
-cat >/etc/apk/repositories <<EOF
+cat > <<EOF
 https://dl-cdn.alpinelinux.org/alpine/v$ALPINE_BRANCH/main
 https://dl-cdn.alpinelinux.org/alpine/v$ALPINE_BRANCH/community
 EOF
@@ -137,7 +137,7 @@ if ! command -v setup-alpine >/dev/null 2>&1; then
 
     # 先尝试使用 ISO 自带的本地软件仓库
     if [ -d /media/cdrom/apks ]; then
-        printf '%s\n' '/media/cdrom/apks' > /etc/apk/repositories
+       
         apk add alpine-conf >/dev/null 2>&1 || true
     fi
 
