@@ -1,270 +1,321 @@
-sh <<'INSTALL_EOF'
 #!/bin/sh
 set -eu
 
-# ==================== 可修改配置 ====================
+# Alpine 3.24+ minimal node server installer for a 1 GiB disk.
+# WARNING: The selected disk will be erased completely.
 
-DISK="/dev/vda"
-HOSTNAME="alpine"
+DISK="${DISK:-/dev/vda}"
+HOSTNAME="${HOSTNAME:-alpine-node}"
+MIRROR_BASE="${MIRROR_BASE:-http://mirrors.aliyun.com/alpine}"
+SSH_PORT="${SSH_PORT:-22}"
+LOG_TMPFS_SIZE="${LOG_TMPFS_SIZE:-8m}"
+SYSLOG_FILE_KB="${SYSLOG_FILE_KB:-128}"
+SYSLOG_BACKUPS="${SYSLOG_BACKUPS:-2}"
+AUTO_POWEROFF="${AUTO_POWEROFF:-yes}"
 
-# 必须修改，不能保留默认值
-ROOT_PASSWORD="CHANGE_THIS_PASSWORD"
+# Compatibility packages for common node installation scripts.
+# BusyBox already provides wget, vi, tar, gzip, unzip, ip, ping, sed and awk.
+TARGET_PACKAGES="${TARGET_PACKAGES:-bash curl ca-certificates}"
 
-# 自动根据当前 ISO 版本选择 v3.24、v3.25 等目录
-MIRROR_BASE="http://mirrors.aliyun.com/alpine"
+say() { printf '\n[+] %s\n' "$*"; }
+warn() { printf '\n[!] %s\n' "$*" >&2; }
+die() { printf '\n[ERROR] %s\n' "$*" >&2; exit 1; }
 
-# 1GB 硬盘不要装太多东西
-# BusyBox 已经自带 wget 和 vi
-EXTRA_PKGS="bash curl ca-certificates nano"
-
-# 安装完自动关机，方便卸载 ISO
-AUTO_POWEROFF="yes"
-
-# ====================================================
-
-log() {
-    printf '\n[+] %s\n' "$*"
-}
-
-die() {
-    printf '\n[错误] %s\n' "$*" >&2
-    exit 1
-}
-
-cleanup() {
+cleanup_mounts() {
+    umount /mnt/run 2>/dev/null || true
+    umount /mnt/sys 2>/dev/null || true
     umount /mnt/proc 2>/dev/null || true
     umount /mnt/dev 2>/dev/null || true
     umount /mnt 2>/dev/null || true
 }
 
-# ---------- 基础检查 ----------
+prompt_password() {
+    [ -n "${ROOT_PASSWORD:-}" ] && return 0
 
-[ "$(id -u)" -eq 0 ] || die "必须使用 root 运行"
+    while :; do
+        printf 'Set the new root password: '
+        stty -echo 2>/dev/null || true
+        IFS= read -r ROOT_PASSWORD
+        stty echo 2>/dev/null || true
+        printf '\nRepeat the root password: '
+        stty -echo 2>/dev/null || true
+        IFS= read -r ROOT_PASSWORD_2
+        stty echo 2>/dev/null || true
+        printf '\n'
 
-[ -b "$DISK" ] || die "没有找到磁盘 $DISK，请先检查磁盘名称"
+        [ -n "$ROOT_PASSWORD" ] || { warn 'Password cannot be empty.'; continue; }
+        [ "$ROOT_PASSWORD" = "$ROOT_PASSWORD_2" ] || { warn 'The two passwords do not match.'; continue; }
+        case "$ROOT_PASSWORD" in
+            *:*) warn 'Do not use a colon in the password for this installer.'; continue ;;
+        esac
+        unset ROOT_PASSWORD_2
+        break
+    done
+}
 
-[ -r /etc/alpine-release ] || die "当前环境不像 Alpine 安装 ISO"
+[ "$(id -u)" -eq 0 ] || die 'Run this installer as root.'
+[ -r /etc/alpine-release ] || die 'This must be run from an Alpine installation ISO.'
+[ -x /sbin/setup-alpine ] || die 'setup-alpine was not found.'
+[ -b "$DISK" ] || die "Disk $DISK was not found. Check /proc/partitions first."
 
-case "$ROOT_PASSWORD" in
-    ""|"CHANGE_THIS_PASSWORD")
-        die "请先修改脚本顶部的 ROOT_PASSWORD"
-        ;;
-    *:*)
-        die "密码中暂时不要包含英文冒号"
-        ;;
+case "$DISK" in
+    /dev/sr*|/dev/loop*) die "$DISK looks like installation media, not a system disk." ;;
 esac
 
 DISK_NAME="${DISK##*/}"
-
-[ -r "/sys/class/block/$DISK_NAME/size" ] ||
-    die "无法读取 $DISK 的容量"
-
+[ -r "/sys/class/block/$DISK_NAME/size" ] || die "Cannot read the capacity of $DISK."
 DISK_MB=$(( $(cat "/sys/class/block/$DISK_NAME/size") / 2048 ))
+[ "$DISK_MB" -ge 850 ] || die "Disk is only about ${DISK_MB} MiB; at least about 850 MiB is required."
 
-[ "$DISK_MB" -ge 800 ] ||
-    die "磁盘容量只有约 ${DISK_MB}MB，空间不足"
+# Prefer the interface carrying the default route; otherwise use the first non-loopback interface.
+IFACE="$(ip route 2>/dev/null | awk '/^default / {print $5; exit}')"
+if [ -z "$IFACE" ]; then
+    for p in /sys/class/net/*; do
+        n="${p##*/}"
+        [ "$n" = lo ] && continue
+        IFACE="$n"
+        break
+    done
+fi
+[ -n "$IFACE" ] || die 'No network interface was found.'
 
-# 自动寻找第一块非 lo 网卡
-IFACE=""
+# Bring networking up when booted from a bare ISO.
+ip link set "$IFACE" up 2>/dev/null || true
+if ! ip -4 addr show dev "$IFACE" 2>/dev/null | grep -q 'inet '; then
+    udhcpc -i "$IFACE" -q -n 2>/dev/null || die "DHCP failed on $IFACE."
+fi
 
-for NET_PATH in /sys/class/net/*; do
-    NET_NAME="${NET_PATH##*/}"
+# Verify both routing and DNS before erasing the disk.
+ping -c 1 -W 3 223.5.5.5 >/dev/null 2>&1 || die 'No external network connectivity.'
+nslookup mirrors.aliyun.com >/dev/null 2>&1 || die 'DNS resolution failed.'
 
-    [ "$NET_NAME" = "lo" ] && continue
-
-    IFACE="$NET_NAME"
-    break
-done
-
-[ -n "$IFACE" ] || die "没有找到可用网卡"
-
-# 从 3.24.1 自动得到 3.24
-ALPINE_BRANCH="$(cut -d. -f1,2 /etc/alpine-release)"
-
+ALPINE_RELEASE="$(cat /etc/alpine-release)"
+ALPINE_BRANCH="$(printf '%s\n' "$ALPINE_RELEASE" | awk -F. '{print $1"."$2}')"
 case "$ALPINE_BRANCH" in
-    [0-9]*.[0-9]*)
-        ;;
-    *)
-        die "无法识别 Alpine 版本：$(cat /etc/alpine-release)"
-        ;;
+    [0-9]*.[0-9]*) ;;
+    *) die "Cannot determine Alpine branch from $ALPINE_RELEASE." ;;
 esac
+REPO="$MIRROR_BASE/v$ALPINE_BRANCH"
 
-REPO="${MIRROR_BASE}/v${ALPINE_BRANCH}"
+case "$SSH_PORT" in
+    ''|*[!0-9]*) die 'SSH_PORT must be a number.' ;;
+esac
+[ "$SSH_PORT" -ge 1 ] && [ "$SSH_PORT" -le 65535 ] || die 'SSH_PORT must be between 1 and 65535.'
 
-log "检测结果"
-echo "Alpine 版本：$(cat /etc/alpine-release)"
-echo "系统磁盘：$DISK，约 ${DISK_MB}MB"
-echo "网络接口：$IFACE"
-echo "软件源：$REPO"
-echo
-echo "警告：5 秒后将清空 $DISK 的全部数据"
-sleep 5
+prompt_password
 
-# ---------- 生成 Alpine 自动安装配置 ----------
+say 'Installation summary'
+printf 'Alpine ISO : %s\n' "$ALPINE_RELEASE"
+printf 'Target disk: %s (%s MiB)\n' "$DISK" "$DISK_MB"
+printf 'Interface  : %s (DHCP)\n' "$IFACE"
+printf 'Repository : %s\n' "$REPO"
+printf 'SSH port   : %s\n' "$SSH_PORT"
+printf 'Packages   : %s\n' "$TARGET_PACKAGES"
+printf 'Logs       : /var/log tmpfs %s, messages %s KiB x %s\n' \
+    "$LOG_TMPFS_SIZE" "$SYSLOG_FILE_KB" "$((SYSLOG_BACKUPS + 1))"
+printf '\nWARNING: ALL DATA ON %s WILL BE ERASED.\n' "$DISK"
+printf 'Type ERASE to continue: '
+IFS= read -r CONFIRM
+[ "$CONFIRM" = ERASE ] || die 'Cancelled.'
 
-cat > /tmp/alpine-answer <<ANSWERS_EOF
-KEYMAPOPTS="us us"
+cat > /tmp/alpine-answer <<EOF
+KEYMAPOPTS=none
 HOSTNAMEOPTS="$HOSTNAME"
-DEVDOPTS="mdev"
-
+DEVDOPTS=mdev
 INTERFACESOPTS="auto lo
 iface lo inet loopback
 
 auto $IFACE
 iface $IFACE inet dhcp
-    hostname $HOSTNAME"
-
-DNSOPTS="223.5.5.5 8.8.8.8"
+    hostname $HOSTNAME
+"
+DNSOPTS=none
 TIMEZONEOPTS="Asia/Shanghai"
-PROXYOPTS="none"
-
+PROXYOPTS=none
 APKREPOSOPTS="$REPO/main $REPO/community"
-
-USEROPTS="none"
-SSHDOPTS="openssh"
-
-NTPOPTS="busybox"
-
+USEROPTS=none
+SSHDOPTS=openssh
+NTPOPTS=busybox
 DISKOPTS="-m sys -s 0 $DISK"
+LBUOPTS=none
+APKCACHEOPTS=none
+EOF
 
-LBUOPTS="none"
-APKCACHEOPTS="none"
-ANSWERS_EOF
-
-# ERASE_DISKS 允许 setup-disk 非交互清空目标磁盘
+# Permit unattended destruction only for the exact target disk.
 export ERASE_DISKS="$DISK"
+export SWAP_SIZE=0
 
-log "开始安装 Alpine"
-
-# -e：安装阶段暂时允许空 root 密码
-# 稍后会在新系统中写入正式密码
+say 'Installing the minimal Alpine system'
 setup-alpine -e -f /tmp/alpine-answer
-
 sync
 sleep 2
 
-# ---------- 自动识别根分区 ----------
-
-ROOT_PART=""
-ROOT_PART_SIZE=0
-
-for PART_PATH in /sys/class/block/${DISK_NAME}*; do
-    [ -f "$PART_PATH/partition" ] || continue
-
-    CURRENT_SIZE="$(cat "$PART_PATH/size")"
-
-    if [ "$CURRENT_SIZE" -gt "$ROOT_PART_SIZE" ]; then
-        ROOT_PART_SIZE="$CURRENT_SIZE"
-        ROOT_PART="/dev/${PART_PATH##*/}"
+# The no-swap layout makes the largest partition the root filesystem.
+ROOT_PART=''
+ROOT_SECTORS=0
+for p in /sys/class/block/${DISK_NAME}*; do
+    [ -f "$p/partition" ] || continue
+    sectors="$(cat "$p/size")"
+    if [ "$sectors" -gt "$ROOT_SECTORS" ]; then
+        ROOT_SECTORS="$sectors"
+        ROOT_PART="/dev/${p##*/}"
     fi
 done
+[ -n "$ROOT_PART" ] && [ -b "$ROOT_PART" ] || die 'Could not identify the installed root partition.'
 
-[ -b "$ROOT_PART" ] ||
-    die "安装完成，但未能自动识别根分区"
-
-log "检测到根分区：$ROOT_PART"
-
-# ---------- 修改新系统 ----------
-
-cleanup
-trap cleanup EXIT
-
+cleanup_mounts
+trap cleanup_mounts EXIT
 mkdir -p /mnt
 mount "$ROOT_PART" /mnt
 
-mkdir -p /mnt/dev /mnt/proc
+for d in dev proc sys run; do mkdir -p "/mnt/$d"; done
 mount -o bind /dev /mnt/dev
-mount -t proc proc /mnt/proc
-
-# 确保 chroot 中可以解析域名
+mount -o bind /proc /mnt/proc
+mount -o bind /sys /mnt/sys
+mount -o bind /run /mnt/run
 cp /etc/resolv.conf /mnt/etc/resolv.conf
 
-log "设置 root 密码"
+say 'Setting the root password'
+printf 'root:%s\n' "$ROOT_PASSWORD" | chroot /mnt chpasswd
+unset ROOT_PASSWORD
 
-printf 'root:%s\n' "$ROOT_PASSWORD" |
-    chroot /mnt chpasswd
+say 'Writing minimal repositories and installing only compatibility tools'
+printf '%s\n%s\n' "$REPO/main" "$REPO/community" > /mnt/etc/apk/repositories
+if [ -n "$TARGET_PACKAGES" ]; then
+    chroot /mnt apk add --no-cache $TARGET_PACKAGES
+fi
 
-log "配置 SSH 密码登录"
-
-# 删除旧配置，避免 OpenSSH 前面的配置优先生效
-sed -i \
-    -e '/PermitRootLogin/d' \
-    -e '/PasswordAuthentication/d' \
-    /mnt/etc/ssh/sshd_config
-
-cat >> /mnt/etc/ssh/sshd_config <<'SSHD_EOF'
-
-# Added by Alpine auto installer
+say 'Configuring SSH'
+mkdir -p /mnt/etc/ssh/sshd_config.d /mnt/run/sshd
+if ! grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' /mnt/etc/ssh/sshd_config; then
+    sed -i '1iInclude /etc/ssh/sshd_config.d/*.conf' /mnt/etc/ssh/sshd_config
+fi
+cat > /mnt/etc/ssh/sshd_config.d/00-node.conf <<EOF
+Port $SSH_PORT
 PermitRootLogin yes
 PasswordAuthentication yes
-SSHD_EOF
-
-log "写入软件源"
-
-printf '%s\n%s\n' \
-    "$REPO/main" \
-    "$REPO/community" \
-    > /mnt/etc/apk/repositories
-
-log "安装精简常用软件"
-
-# 不安装 util-linux、parted、grub、vim 等大包
-chroot /mnt apk add --no-cache $EXTRA_PKGS
-
-log "生成 SSH 主机密钥"
-
-chroot /mnt ssh-keygen -A
-
-log "确保服务开机启动"
-
-chroot /mnt rc-update add networking boot >/dev/null 2>&1 || true
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+UseDNS no
+X11Forwarding no
+AllowTcpForwarding yes
+GatewayPorts no
+ClientAliveInterval 300
+ClientAliveCountMax 2
+LogLevel INFO
+EOF
+chroot /mnt ssh-keygen -A >/dev/null 2>&1 || true
+chroot /mnt /usr/sbin/sshd -t
 chroot /mnt rc-update add sshd default >/dev/null 2>&1 || true
+
+say 'Keeping only small, useful services'
+# Keep: networking, seedrng, syslog, crond, busybox ntpd and sshd.
+# acpid is retained when installed because cloud platforms may use it for graceful shutdown.
+chroot /mnt rc-update add networking boot >/dev/null 2>&1 || true
+chroot /mnt rc-update add syslog boot >/dev/null 2>&1 || true
+chroot /mnt rc-update add crond default >/dev/null 2>&1 || true
 chroot /mnt rc-update add ntpd default >/dev/null 2>&1 || true
 
-# 检查 SSH 配置
-mkdir -p /mnt/run/sshd
-chroot /mnt /usr/sbin/sshd -t
+say 'Limiting logs and moving standard logs to RAM'
+mkdir -p /mnt/var/log /mnt/etc/conf.d
+cat > /mnt/etc/conf.d/syslog <<EOF
+SYSLOGD_OPTS="-C64 -O /var/log/messages -s $SYSLOG_FILE_KB -b $SYSLOG_BACKUPS"
+KLOGD_OPTS=""
+EOF
 
-# ---------- 1GB 硬盘空间优化 ----------
+# A hard upper bound prevents standard logs from consuming the 1 GiB disk.
+if ! grep -qE '^[^#]+[[:space:]]+/var/log[[:space:]]+tmpfs' /mnt/etc/fstab; then
+    printf 'tmpfs\t/var/log\ttmpfs\trw,nosuid,nodev,noexec,size=%s,mode=0755\t0\t0\n' \
+        "$LOG_TMPFS_SIZE" >> /mnt/etc/fstab
+fi
+rm -rf /mnt/var/log/*
 
-log "清理安装缓存"
+say 'Reducing disk writes and blocking core dumps'
+# Add noatime without discarding the installer's existing mount options.
+awk 'BEGIN { OFS="\t" }
+    /^[[:space:]]*#/ || NF < 4 { print; next }
+    $2 == "/" {
+        if ($4 == "defaults") $4 = "defaults,noatime"
+        else if ($4 !~ /(^|,)noatime(,|$)/) $4 = $4 ",noatime"
+    }
+    { print }
+' /mnt/etc/fstab > /mnt/etc/fstab.new
+mv /mnt/etc/fstab.new /mnt/etc/fstab
 
-rm -rf /mnt/var/cache/apk/*
-rm -rf /mnt/tmp/*
-rm -rf /mnt/root/.cache 2>/dev/null || true
+mkdir -p /mnt/etc/sysctl.d /mnt/etc/profile.d
+cat > /mnt/etc/sysctl.d/99-tiny-disk.conf <<'EOF'
+fs.suid_dumpable = 0
+kernel.core_pattern = /dev/null
+EOF
+cat > /mnt/etc/profile.d/no-coredump.sh <<'EOF'
+ulimit -c 0 2>/dev/null || true
+EOF
+chmod 644 /mnt/etc/profile.d/no-coredump.sh
 
-# 将 ext4 默认预留空间从 5% 调低到 1%
-if command -v tune2fs >/dev/null 2>&1; then
-    tune2fs -m 1 "$ROOT_PART" >/dev/null 2>&1 || true
+# Raise file descriptor allowance for proxy/node daemons started by OpenRC.
+if ! grep -q '^rc_ulimit=' /mnt/etc/rc.conf 2>/dev/null; then
+    printf '\nrc_ulimit="-n 65535"\n' >> /mnt/etc/rc.conf
 fi
 
-echo
-df -h /mnt || true
+say 'Installing automatic cache cleanup and disk guard'
+mkdir -p /mnt/usr/local/sbin /mnt/etc/periodic/daily /mnt/etc/periodic/15min
+cat > /mnt/usr/local/sbin/clean-space <<'EOF'
+#!/bin/sh
+rm -rf /var/cache/apk/* /root/.cache/* 2>/dev/null || true
+find /tmp /var/tmp -mindepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+find /var/log -type f -size +512k -exec sh -c ': > "$1"' sh {} \; 2>/dev/null || true
+sync
+df -h /
+EOF
+chmod 755 /mnt/usr/local/sbin/clean-space
+
+cat > /mnt/etc/periodic/daily/tiny-disk-clean <<'EOF'
+#!/bin/sh
+/usr/local/sbin/clean-space >/dev/null 2>&1
+EOF
+chmod 755 /mnt/etc/periodic/daily/tiny-disk-clean
+
+cat > /mnt/etc/periodic/15min/tiny-disk-guard <<'EOF'
+#!/bin/sh
+used="$(df -P / | awk 'NR == 2 { gsub(/%/, "", $5); print $5 }')"
+case "$used" in
+    ''|*[!0-9]*) exit 0 ;;
+esac
+[ "$used" -ge 90 ] && /usr/local/sbin/clean-space >/dev/null 2>&1
+exit 0
+EOF
+chmod 755 /mnt/etc/periodic/15min/tiny-disk-guard
+
+say 'Removing caches and installation leftovers'
+rm -rf \
+    /mnt/var/cache/apk/* \
+    /mnt/root/.cache \
+    /mnt/root/.ash_history \
+    /mnt/tmp/* \
+    /mnt/var/tmp/* \
+    /mnt/etc/apk/cache 2>/dev/null || true
+
+# Release the ext4 blocks normally reserved for non-root users (usually about 5%).
+if ! command -v tune2fs >/dev/null 2>&1; then
+    apk add --no-cache e2fsprogs-extra >/dev/null 2>&1 || \
+        apk add --no-cache e2fsprogs >/dev/null 2>&1 || true
+fi
+if command -v tune2fs >/dev/null 2>&1 && blkid "$ROOT_PART" 2>/dev/null | grep -q 'TYPE="ext[234]"'; then
+    tune2fs -m 0 "$ROOT_PART" >/dev/null 2>&1 || true
+fi
 
 sync
-cleanup
+say 'Final disk usage'
+df -h /mnt || true
+printf '\nInstalled root partition: %s\n' "$ROOT_PART"
+printf 'SSH login: root@SERVER_IP port %s\n' "$SSH_PORT"
+printf 'After shutdown, detach the ISO and boot from %s.\n' "$DISK"
+
+cleanup_mounts
 trap - EXIT
 
-echo
-echo "========================================"
-echo " Alpine 安装完成"
-echo " 系统盘：$DISK"
-echo " 根分区：$ROOT_PART"
-echo " SSH 用户：root"
-echo " SSH 端口：22"
-echo "========================================"
-echo
-echo "接下来需要："
-echo "1. 从虚拟机中卸载 Alpine ISO"
-echo "2. 将硬盘设置为第一启动项"
-echo "3. 启动虚拟机"
-echo "4. 使用 SSH 连接服务器 IP"
-
-if [ "$AUTO_POWEROFF" = "yes" ]; then
-    echo
-    echo "系统将在 5 秒后关机，请随后卸载 ISO"
-    sleep 5
+if [ "$AUTO_POWEROFF" = yes ]; then
+    printf '\nPowering off in 10 seconds. Detach the ISO before the next boot.\n'
+    sleep 10
     poweroff
 fi
-
-INSTALL_EOF
