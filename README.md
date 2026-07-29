@@ -21,32 +21,6 @@ ping -c 3 github.com
 ```
 busybox wget -O /tmp/vnc.sh https://raw.githubusercontent.com/7742-a/server/main/vnc.sh && sh /tmp/vnc.sh
 ```
-```
-busybox wget -O /tmp/debian.sh https://raw.githubusercontent.com/7742-a/server/main/debian.sh && sh /tmp/debian.sh
-```
-等待电脑重启 alpine就安装完成了
-注意有很多包都是不全的 需要再次安装补全比如wget
-后续安装
-```
-apk update
 
-apk add \
-bash \
-curl \
-wget \
-nano \
-vim \
-git \
-ca-certificates \
-openssl \
-tzdata \
-busybox-extras \
-iproute2 \
-iptables \
-iptables-legacy \
-lsof \
-procps \
-jq \
-tar \
-gzip
-```
+等待电脑重启 alpine就安装完成了
+
