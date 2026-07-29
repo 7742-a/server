@@ -124,11 +124,21 @@ if [ -n "$need_live_pkgs" ]; then
         # shellcheck disable=SC2086
         apt-get install -y --no-install-recommends $need_live_pkgs fdisk dosfstools e2fsprogs >/dev/null
     elif command -v apk >/dev/null 2>&1; then
-        # Alpine ISO: debootstrap lives in the community repo.
-        if ! grep -q 'community' /etc/apk/repositories 2>/dev/null; then
-            REL="$(cut -d. -f1,2 /etc/alpine-release 2>/dev/null || echo 3.20)"
-            printf 'https://dl-cdn.alpinelinux.org/alpine/v%s/community\n' "$REL" >> /etc/apk/repositories
+        # Alpine ISO: debootstrap lives in the community repo. Make sure the
+        # network repositories are configured AND the apk index is refreshed
+        # (a bare ISO often only lists the cdrom, and an added repo is
+        # invisible until `apk update` runs).
+        REL="$(cut -d. -f1,2 /etc/alpine-release 2>/dev/null || echo 3.20)"
+        ALPINE_MIRROR="${ALPINE_MIRROR:-https://mirrors.aliyun.com/alpine}"
+        if ! grep -qE '^\s*http' /etc/apk/repositories 2>/dev/null; then
+            printf '%s\n%s\n' \
+                "$ALPINE_MIRROR/v$REL/main" \
+                "$ALPINE_MIRROR/v$REL/community" \
+                >> /etc/apk/repositories
+        elif ! grep -q 'community' /etc/apk/repositories 2>/dev/null; then
+            printf '%s\n' "$ALPINE_MIRROR/v$REL/community" >> /etc/apk/repositories
         fi
+        apk update
         apk add debootstrap util-linux e2fsprogs dosfstools curl sfdisk 2>/dev/null \
             || apk add debootstrap util-linux e2fsprogs dosfstools curl
     else
