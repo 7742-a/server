@@ -20,4 +20,5 @@ ping -c 3 github.com
 运行一下脚本
 ```busybox wget -O /tmp/vnc.sh https://raw.githubusercontent.com/7742-a/server/main/vnc.sh && sh /tmp/vnc.sh```
 等待电脑重启 alpine就安装完成了
-
+注意有很多包都是不全的 需要再次安装补全比如wget
+``apk add wget```
