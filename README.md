@@ -25,5 +25,25 @@ busybox wget -O /tmp/vnc.sh https://raw.githubusercontent.com/7742-a/server/main
 注意有很多包都是不全的 需要再次安装补全比如wget
 后续安装
 ```
-apk add wget
+apk update
+
+apk add \
+bash \
+curl \
+wget \
+nano \
+vim \
+git \
+ca-certificates \
+openssl \
+tzdata \
+busybox-extras \
+iproute2 \
+iptables \
+iptables-legacy \
+lsof \
+procps \
+jq \
+tar \
+gzip
 ```
